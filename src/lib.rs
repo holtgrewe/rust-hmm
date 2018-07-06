@@ -144,170 +144,6 @@ pub trait Model<Observation> {
     fn observation_prob(&self, state: State, observation: &Observation) -> LogProb;
 }
 
-/// Compute the probability Viterbi matrix and the pointers to the origin.
-fn viterbi_matrices<Observation>(
-    hmm: &Model<Observation>,
-    observations: &[Observation],
-) -> (Array2<LogProb>, Array2<usize>) {
-    // The matrix with probabilities.
-    let mut vals = Array2::<LogProb>::zeros((observations.len(), hmm.num_states()));
-    // For each cell in `vals`, a pointer to the row in the previous column (for the traceback).
-    let mut from = Array2::<usize>::zeros((observations.len(), hmm.num_states()));
-
-    // Compute matrix.
-    for (i, o) in observations.iter().enumerate() {
-        if i == 0 {
-            // Initial column.
-            for s in hmm.states() {
-                vals[[0, *s]] = hmm.initial_prob(s) + hmm.observation_prob(s, o);
-                from[[0, *s]] = *s;
-            }
-        } else {
-            // Subsequent columns.
-            for j in hmm.states() {
-                let x = vals.subview(Axis(0), i - 1)
-                    .iter()
-                    .enumerate()
-                    .map(|(a, p)| (State(a), p))
-                    .max_by(|(a, &x), (b, &y)| {
-                        if x.is_zero() && y.is_zero() {
-                            Ordering::Equal
-                        } else if x.is_zero() {
-                            Ordering::Less
-                        } else if y.is_zero() {
-                            Ordering::Greater
-                        } else {
-                            (x + hmm.transition_prob(*a, j))
-                                .partial_cmp(&(y + hmm.transition_prob(*b, j)))
-                                .unwrap()
-                        }
-                    })
-                    .map(|(x, y)| (x, *y))
-                    .unwrap();
-                vals[[i, *j]] = x.1 + hmm.transition_prob(x.0, j) + hmm.observation_prob(j, o);
-                from[[i, *j]] = *x.0;
-            }
-        }
-    }
-
-    (vals, from)
-}
-
-fn viterbi_traceback(vals: Array2<LogProb>, from: Array2<usize>) -> (Vec<State>, LogProb) {
-    // Traceback through matrix.
-    let n = vals.len_of(Axis(0));
-    let mut result: Vec<State> = Vec::new();
-    let mut curr = 0;
-    let mut res_prob = LogProb::ln_zero();
-    for (i, col) in vals.axis_iter(Axis(0)).rev().enumerate() {
-        if i == 0 {
-            let tmp = col.iter()
-                .enumerate()
-                .max_by_key(|&(_, item)| OrderedFloat(**item))
-                .unwrap();
-            curr = tmp.0;
-            res_prob = *tmp.1;
-        } else {
-            curr = from[[n - i, curr]];
-        }
-        result.push(State(curr));
-    }
-    result.reverse();
-
-    (result, res_prob)
-}
-
-/// Execute Viterbi algorithm on the given slice of `Observation` values to get the maximum a
-/// posteriori (MAP) probability.
-///
-/// The results is a `Vec` of the most probable states and the `LogProb` of this path
-/// through the Viterbi matrix.
-pub fn viterbi<Observation>(
-    hmm: &Model<Observation>,
-    observations: &[Observation],
-) -> (Vec<State>, LogProb) {
-    let (vals, from) = viterbi_matrices(hmm, observations);
-    viterbi_traceback(vals, from)
-}
-
-/// Execute the forward algorithm and return the forward probabilites as `LogProb` values
-/// and the resulting forward probaiblity.
-pub fn forward<Observation>(
-    hmm: &Model<Observation>,
-    observations: &[Observation],
-) -> (Array2<LogProb>, LogProb) {
-    // The matrix with probabilities.
-    let mut vals = Array2::<LogProb>::zeros((observations.len(), hmm.num_states()));
-
-    // Compute matrix.
-    for (i, o) in observations.iter().enumerate() {
-        if i == 0 {
-            // Initial column.
-            for s in hmm.states() {
-                vals[[0, *s]] = hmm.initial_prob(s) + hmm.observation_prob(s, o);
-            }
-        } else {
-            // Subsequent columns.
-            for j in hmm.states() {
-                let xs = hmm.states()
-                    .map(|k| {
-                        vals[[i - 1, *k]] + hmm.transition_prob(k, j) + hmm.observation_prob(j, o)
-                    })
-                    .collect::<Vec<LogProb>>();
-                vals[[i, *j]] = LogProb::ln_sum_exp(&xs);
-            }
-        }
-    }
-
-    // Compute final probability.
-    let prob = LogProb::ln_sum_exp(vals.row(observations.len() - 1).into_slice().unwrap());
-
-    (vals, prob)
-}
-
-/// Execute the backward algorithm and return the backward probabilites as `LogProb` values
-/// and the resulting backward probaiblity.
-pub fn backward<Observation>(
-    hmm: &Model<Observation>,
-    observations: &[Observation],
-) -> (Array2<LogProb>, LogProb) {
-    // The matrix with probabilities.
-    let mut vals = Array2::<LogProb>::zeros((observations.len(), hmm.num_states()));
-
-    // Compute matrix.
-    for (i, o) in observations.iter().rev().enumerate() {
-        if i == 0 {
-            // Initial (last) column.
-            for j in hmm.states() {
-                vals[[0, *j]] = LogProb::ln_one() + hmm.observation_prob(j, o);
-            }
-        } else {
-            // Previous columns.
-            for j in hmm.states() {
-                let maybe_initial = if *j == hmm.num_states() - 1 {
-                    hmm.initial_prob(j)
-                } else {
-                    LogProb::ln_one()
-                };
-                let xs = hmm.states()
-                    .map(|k| {
-                        vals[[i - 1, *k]]
-                            + hmm.transition_prob(j, k)
-                            + hmm.observation_prob(j, o)
-                            + maybe_initial
-                    })
-                    .collect::<Vec<LogProb>>();
-                vals[[i, *j]] = LogProb::ln_sum_exp(&xs);
-            }
-        }
-    }
-
-    // Compute final probability.
-    let prob = LogProb::ln_sum_exp(vals.row(observations.len() - 1).into_slice().unwrap());
-
-    (vals, prob)
-}
-
 /// Implementation of Hidden Markov Model with emission values from discrete distributions.
 pub mod discrete_emission {
     use super::*;
@@ -528,6 +364,174 @@ pub mod univariate_continuous_emission {
     pub type GaussianModel = Model<statrs::distribution::Normal>;
 }
 
+/// Compute the probability Viterbi matrix and the pointers to the origin.
+fn viterbi_matrices<Observation>(
+    hmm: &Model<Observation>,
+    observations: &[Observation],
+) -> (Array2<LogProb>, Array2<usize>) {
+    // The matrix with probabilities.
+    let mut vals = Array2::<LogProb>::zeros((observations.len(), hmm.num_states()));
+    // For each cell in `vals`, a pointer to the row in the previous column (for the traceback).
+    let mut from = Array2::<usize>::zeros((observations.len(), hmm.num_states()));
+
+    // Compute matrix.
+    for (i, o) in observations.iter().enumerate() {
+        if i == 0 {
+            // Initial column.
+            for s in hmm.states() {
+                vals[[0, *s]] = hmm.initial_prob(s) + hmm.observation_prob(s, o);
+                from[[0, *s]] = *s;
+            }
+        } else {
+            // Subsequent columns.
+            for j in hmm.states() {
+                let x = vals.subview(Axis(0), i - 1)
+                    .iter()
+                    .enumerate()
+                    .map(|(a, p)| (State(a), p))
+                    .max_by(|(a, &x), (b, &y)| {
+                        if x.is_zero() && y.is_zero() {
+                            Ordering::Equal
+                        } else if x.is_zero() {
+                            Ordering::Less
+                        } else if y.is_zero() {
+                            Ordering::Greater
+                        } else {
+                            (x + hmm.transition_prob(*a, j))
+                                .partial_cmp(&(y + hmm.transition_prob(*b, j)))
+                                .unwrap()
+                        }
+                    })
+                    .map(|(x, y)| (x, *y))
+                    .unwrap();
+                vals[[i, *j]] = x.1 + hmm.transition_prob(x.0, j) + hmm.observation_prob(j, o);
+                from[[i, *j]] = *x.0;
+            }
+        }
+    }
+
+    (vals, from)
+}
+
+fn viterbi_traceback(vals: Array2<LogProb>, from: Array2<usize>) -> (Vec<State>, LogProb) {
+    // Traceback through matrix.
+    let n = vals.len_of(Axis(0));
+    let mut result: Vec<State> = Vec::new();
+    let mut curr = 0;
+    let mut res_prob = LogProb::ln_zero();
+    for (i, col) in vals.axis_iter(Axis(0)).rev().enumerate() {
+        if i == 0 {
+            let tmp = col.iter()
+                .enumerate()
+                .max_by_key(|&(_, item)| OrderedFloat(**item))
+                .unwrap();
+            curr = tmp.0;
+            res_prob = *tmp.1;
+        } else {
+            curr = from[[n - i, curr]];
+        }
+        result.push(State(curr));
+    }
+    result.reverse();
+
+    (result, res_prob)
+}
+
+/// Execute Viterbi algorithm on the given slice of `Observation` values to get the maximum a
+/// posteriori (MAP) probability.
+///
+/// The results is a `Vec` of the most probable states and the `LogProb` of this path
+/// through the Viterbi matrix.
+pub fn viterbi<Observation>(
+    hmm: &Model<Observation>,
+    observations: &[Observation],
+) -> (Vec<State>, LogProb) {
+    let (vals, from) = viterbi_matrices(hmm, observations);
+    viterbi_traceback(vals, from)
+}
+
+/// Execute the forward algorithm and return the forward probabilites as `LogProb` values
+/// and the resulting forward probaiblity.
+pub fn forward<Observation>(
+    hmm: &Model<Observation>,
+    observations: &[Observation],
+) -> (Array2<LogProb>, LogProb) {
+    // The matrix with probabilities.
+    let mut vals = Array2::<LogProb>::zeros((observations.len(), hmm.num_states()));
+
+    // Compute matrix.
+    for (i, o) in observations.iter().enumerate() {
+        if i == 0 {
+            // Initial column.
+            for s in hmm.states() {
+                vals[[0, *s]] = hmm.initial_prob(s) + hmm.observation_prob(s, o);
+            }
+        } else {
+            // Subsequent columns.
+            for j in hmm.states() {
+                let xs = hmm.states()
+                    .map(|k| {
+                        vals[[i - 1, *k]] + hmm.transition_prob(k, j) + hmm.observation_prob(j, o)
+                    })
+                    .collect::<Vec<LogProb>>();
+                vals[[i, *j]] = LogProb::ln_sum_exp(&xs);
+            }
+        }
+    }
+
+    // Compute final probability.
+    let prob = LogProb::ln_sum_exp(vals.row(observations.len() - 1).into_slice().unwrap());
+
+    (vals, prob)
+}
+
+/// Execute the backward algorithm and return the backward probabilites as `LogProb` values
+/// and the resulting backward probaiblity.
+pub fn backward<Observation>(
+    hmm: &Model<Observation>,
+    observations: &[Observation],
+) -> (Array2<LogProb>, LogProb) {
+    // The matrix with probabilities.
+    let mut vals = Array2::<LogProb>::zeros((observations.len(), hmm.num_states()));
+
+    // Compute matrix.
+    for (i, o) in observations.iter().rev().enumerate() {
+        if i == 0 {
+            for j in hmm.states() {
+                let maybe_initial = if i == observations.len() - 1 {
+                    hmm.initial_prob(j)
+                } else {
+                    LogProb::ln_one()
+                };
+                vals[[0, *j]] = LogProb::ln_one() + hmm.observation_prob(j, o) + maybe_initial;
+            }
+        } else {
+            // Previous columns.
+            for j in hmm.states() {
+                let maybe_initial = if i == observations.len() - 1 {
+                    hmm.initial_prob(j)
+                } else {
+                    LogProb::ln_one()
+                };
+                let xs = hmm.states()
+                    .map(|k| {
+                        vals[[i - 1, *k]]
+                            + hmm.transition_prob(j, k)
+                            + hmm.observation_prob(j, o)
+                            + maybe_initial
+                    })
+                    .collect::<Vec<LogProb>>();
+                vals[[i, *j]] = LogProb::ln_sum_exp(&xs);
+            }
+        }
+    }
+
+    // Compute final probability.
+    let prob = LogProb::ln_sum_exp(vals.row(observations.len() - 1).into_slice().unwrap());
+
+    (vals, prob)
+}
+
 #[cfg(test)]
 mod tests {
     use bio::stats::Prob;
@@ -575,6 +579,34 @@ mod tests {
         let prob = Prob::from(log_prob);
 
         assert_relative_eq!(0.0038432_f64, *prob, epsilon = 0.0001);
+    }
+
+    #[test]
+    fn test_discrete_forward_equals_backward_to_example() {
+        // Same toy example as above.
+        let transition = array![[0.5, 0.5], [0.4, 0.6]];
+        let observation = array![[0.2, 0.3, 0.3, 0.2], [0.3, 0.2, 0.2, 0.3]];
+        let initial = array![0.5, 0.5];
+
+        for len in 1..10 {
+            let mut seq: Vec<usize> = vec![0; len];
+            while seq.iter().sum::<usize>() != len {
+                for i in 0..len {
+                    if seq[i] == 0 {
+                        seq[i] = 1;
+                        break;
+                    } else {
+                        seq[i] = 0;
+                    }
+                }
+
+                let hmm = DiscreteEmissionHMM::with_float(&transition, &observation, &initial)
+                    .expect("Dimensions should be consistent");
+                let prob_fwd = *Prob::from(forward(&hmm, &seq).1);
+                let prob_bck = *Prob::from(backward(&hmm, &seq).1);
+                assert_relative_eq!(prob_fwd, prob_bck, epsilon = 0.00001);
+            }
+        }
     }
 
     #[test]
@@ -631,7 +663,7 @@ mod tests {
         let log_prob = forward(&hmm, &vec![0.1, 1.5, 1.8, 2.2, 0.5]).1;
         let prob = Prob::from(log_prob);
 
-        assert_relative_eq!(2.675e-4_f64, *prob, epsilon = 1e-5_f64);
+        assert_relative_eq!(7.28201e-4_f64, *prob, epsilon = 0.0001);
     }
 
     #[test]
@@ -648,6 +680,6 @@ mod tests {
         let log_prob = backward(&hmm, &vec![0.1, 1.5, 1.8, 2.2, 0.5]).1;
         let prob = Prob::from(log_prob);
 
-        assert_relative_eq!(2.675e-4_f64, *prob, epsilon = 1e-5_f64);
+        assert_relative_eq!(7.28201e-4_f64, *prob, epsilon = 0.0001);
     }
 }
